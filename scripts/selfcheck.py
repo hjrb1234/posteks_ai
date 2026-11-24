@@ -85,6 +85,7 @@ def local_checks(session):
     from server.workflows import VerifiedSolution
     from server.source_access import can_use_for_answer
     from server.ocr import diagnostic
+    from server.media import VIDEO_TOOL_SETUP, video_tool_status
     checks, material = [], None
     index = ROOT / 'frontend/dist/index.html'
     assets = re.findall(r'(?:src|href)="(/assets/[^"?#]+)', index.read_text(encoding='utf-8')) if index.is_file() else []
@@ -97,11 +98,14 @@ def local_checks(session):
         'Проверены запуск Tesseract и языки rus/eng; текстовые PDF обрабатываются независимо от OCR.',
         {'code': ocr.get('code'), 'available': ocr['available']},
         '' if ocr['available'] else 'Укажите TESSERACT_CMD и выполните python -m scripts.install_ocr из виртуальной среды.'))
-    video_ok = bool(shutil.which(os.getenv('FFPROBE_PATH') or 'ffprobe')
-                    and shutil.which(os.getenv('FFMPEG_PATH') or 'ffmpeg'))
+    video_status = video_tool_status()
+    video_codes = [f'{tool}_{state}' for tool, state in video_status.items() if state != 'ready']
+    video_ok = not video_codes
     checks.append(result('files.video_tools', 'pass' if video_ok else 'warn', 'Средства обработки видео',
-        'Проверено наличие FFmpeg и ffprobe; это не означает, что просмотрено конкретное видео.',
-        {'available': video_ok}, '' if video_ok else 'Установите FFmpeg и задайте FFMPEG_PATH/FFPROBE_PATH в локальном .env.'))
+        'Проверен локальный запуск FFmpeg и ffprobe без чтения видео.',
+        {'available': video_ok, 'ffmpeg_available': video_status['ffmpeg'] == 'ready',
+         'ffprobe_available': video_status['ffprobe'] == 'ready', 'code': next(iter(video_codes), None)},
+        '' if video_ok else VIDEO_TOOL_SETUP))
     if session is None:
         checks.append(result('database.read', 'fail', 'Рабочая база', 'Существующая SQLite не найдена или выбран иной тип БД.',
             resolution='Проверьте DATABASE_URL и STORAGE_DIR. Тест не создаёт пустую базу вместо рабочей.'))

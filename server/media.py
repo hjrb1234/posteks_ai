@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 
 from . import ai
 from .auth import get_actor_scope, optional_user
-from .config import settings
+from .config import project_path, settings
 from .db import get_session, utcnow
 from .knowledge import IndexingError, extract_pages
 from .models import AIUsage, AppSetting, Conversation
@@ -34,6 +34,66 @@ IMAGE_TYPES = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
 VIDEO_TYPES = {'.mp4': 'video/mp4', '.mov': 'video/quicktime', '.webm': 'video/webm'}
 MAX_VIDEO_BYTES = 25 * 1024 * 1024
 MAX_VIDEO_SECONDS = 180
+VIDEO_TOOL_SETUP = ('Установите FFmpeg вместе с ffprobe. Добавьте папку bin в PATH или укажите '
+                    'FFMPEG_PATH и FFPROBE_PATH в локальном .env, затем перезапустите приложение.')
+_IS_WINDOWS = os.name == 'nt'
+
+
+class FFmpegToolError(ValueError):
+    def __init__(self, reason: str, message: str):
+        self.reason = reason
+        super().__init__(message)
+
+
+def _configured_ffmpeg_tool(tool: str) -> str:
+    value = os.getenv(tool.upper() + '_PATH', '').strip().strip('"')
+    return str(project_path(value)) if '/' in value or '\\' in value else value
+
+
+def _ffmpeg_binary(tool: str) -> str:
+    configured = _configured_ffmpeg_tool(tool)
+    if configured:
+        if binary := shutil.which(configured):
+            return binary
+        raise FFmpegToolError('configuration',
+            f'Параметр {tool.upper()}_PATH указывает на недоступную программу. {VIDEO_TOOL_SETUP}')
+    if binary := shutil.which(tool):
+        return binary
+    peer = _configured_ffmpeg_tool('ffprobe' if tool == 'ffmpeg' else 'ffmpeg')
+    if peer and (peer_binary := shutil.which(peer)):
+        sibling = Path(peer_binary).with_name(tool + ('.exe' if _IS_WINDOWS else ''))
+        if binary := shutil.which(str(sibling)):
+            return binary
+    if _IS_WINDOWS:
+        folders = []
+        if local := os.getenv('LOCALAPPDATA'):
+            folders.append(Path(local) / 'Microsoft' / 'WinGet' / 'Links')
+        if programs := os.getenv('PROGRAMFILES'):
+            folders.extend([Path(programs) / 'WinGet' / 'Links', Path(programs) / 'FFmpeg' / 'bin'])
+        if drive := os.getenv('SystemDrive'):
+            folders.append(Path(drive + '/') / 'ffmpeg' / 'bin')
+        for folder in folders:
+            if binary := shutil.which(str(folder / (tool + '.exe'))):
+                return binary
+    raise FFmpegToolError('unavailable', f'Не найден {tool}. {VIDEO_TOOL_SETUP}')
+
+
+def video_tool_status() -> dict[str, str]:
+    """Check that both installed executables can run, without reading a video."""
+    status = {}
+    for tool in ('ffprobe', 'ffmpeg'):
+        try:
+            binary = _ffmpeg_binary(tool)
+        except FFmpegToolError as exc:
+            status[tool] = exc.reason
+            continue
+        try:
+            completed = subprocess.run([binary, '-version'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.DEVNULL, timeout=5, check=False)
+            status[tool] = 'unusable' if completed.returncode else 'ready'
+        except (OSError, subprocess.TimeoutExpired):
+            status[tool] = 'unusable'
+    return status
 
 
 def audio_duration(data: bytes, suffix: str) -> float:
@@ -45,9 +105,10 @@ def audio_duration(data: bytes, suffix: str) -> float:
         except (wave.Error, EOFError):
             raise HTTPException(422, 'WAV-файл повреждён или содержит неподдерживаемый аудиокодек') from None
     else:
-        binary = shutil.which(os.getenv('FFPROBE_PATH') or 'ffprobe')
-        if not binary:
-            raise HTTPException(503, 'Для записи из браузера и сжатого аудио установите FFmpeg (ffprobe) в PATH. Без него доступен WAV PCM.')
+        try:
+            binary = _ffmpeg_binary('ffprobe')
+        except FFmpegToolError as exc:
+            raise HTTPException(503, f'{exc} Для распознавания без ffprobe доступен WAV PCM.') from None
         with tempfile.TemporaryDirectory(prefix='posteks-audio-') as temporary:
             path = Path(temporary) / ('speech' + suffix)
             path.write_bytes(data)
@@ -131,32 +192,46 @@ def _image_observations(session, data: bytes, mime: str):
 
 def _video_probe(path: Path):
     """Read local metadata only; do not confuse this with understanding a clip."""
-    binary = shutil.which(os.getenv('FFPROBE_PATH') or 'ffprobe')
-    if not binary:
-        return None, 'video_probe_unavailable', 'Видео получено, но не обработано: на сервере недоступен ffprobe из FFmpeg.'
+    try:
+        binary = _ffmpeg_binary('ffprobe')
+    except FFmpegToolError as exc:
+        return None, 'video_probe_' + exc.reason, f'Оригинал видео сохранён. {exc}'
     try:
         completed = subprocess.run([binary, '-v', 'error', '-protocol_whitelist', 'file,pipe',
-            '-select_streams', 'v:0', '-show_entries', 'stream=width,height,duration:format=duration',
+            '-select_streams', 'V:0', '-show_entries', 'stream=width,height,duration:format=duration',
             '-of', 'json', str(path)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, timeout=10, check=False)
         result = json.loads(completed.stdout[:65536])
         stream = (result.get('streams') or [])[0]
-        duration = float(stream.get('duration') or result.get('format', {}).get('duration'))
+        duration = _video_duration(stream.get('duration'), result.get('format', {}).get('duration'))
         width, height = int(stream['width']), int(stream['height'])
-        if completed.returncode or not math.isfinite(duration) or duration <= 0 or width <= 0 or height <= 0:
+        if completed.returncode or width <= 0 or height <= 0:
             raise ValueError('Invalid metadata')
         if duration > MAX_VIDEO_SECONDS or width * height > 16_000_000:
             return None, 'video_limits', 'Видео получено, но не обработано: для анализа нужен ролик до 3 минут и до 16 мегапикселей в кадре.'
         return {'duration_seconds': round(duration, 3), 'width': width, 'height': height,
                 'audio_analyzed': False, 'sample_times_seconds': []}, None, None
-    except (OSError, ValueError, TypeError, KeyError, IndexError, subprocess.TimeoutExpired):
-        return None, 'video_probe_failed', 'Видео получено, но прочитать его содержимое не удалось: файл повреждён, кодек не поддерживается или проверка превысила время ожидания.'
+    except OSError:
+        return None, 'video_probe_unusable', f'Оригинал видео сохранён. Не удалось запустить ffprobe. {VIDEO_TOOL_SETUP}'
+    except subprocess.TimeoutExpired:
+        return None, 'video_probe_timeout', 'Оригинал видео сохранён. Проверка ролика заняла слишком много времени. Попробуйте более короткий MP4 (H.264).'
+    except (ValueError, TypeError, AttributeError, KeyError, IndexError):
+        return None, 'video_probe_failed', 'Оригинал видео сохранён. ffprobe не смог прочитать видеопоток. Проверьте, что файл воспроизводится, или сохраните ролик как MP4 (H.264).'
+
+
+def _video_duration(*candidates) -> float:
+    for candidate in candidates:
+        try:
+            seconds = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(seconds) and seconds > 0:
+            return seconds
+    raise ValueError('Video duration unavailable')
 
 
 def _video_frames(path: Path, metadata):
-    binary = shutil.which(os.getenv('FFMPEG_PATH') or 'ffmpeg')
-    if not binary:
-        raise HTTPException(503, 'Видео получено, но анализ кадров недоступен: установите FFmpeg на сервере.')
+    binary = _ffmpeg_binary('ffmpeg')
     # Three samples are deliberately labelled as samples, never as continuous
     # viewing or proof of a defect between the sampled instants.
     duration = metadata['duration_seconds']
@@ -165,15 +240,17 @@ def _video_frames(path: Path, metadata):
         try:
             completed = subprocess.run([binary, '-v', 'error', '-nostdin',
                 '-protocol_whitelist', 'file,pipe', '-ss', str(second), '-i', str(path),
-                '-frames:v', '1', '-vf', 'scale=960:960:force_original_aspect_ratio=decrease',
+                '-map', '0:V:0', '-frames:v', '1', '-vf', 'scale=960:960:force_original_aspect_ratio=decrease',
                 '-f', 'image2pipe', '-vcodec', 'mjpeg', '-q:v', '5', 'pipe:1'],
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 timeout=10, check=False)
             if completed.returncode or not completed.stdout.startswith(b'\xff\xd8') or len(completed.stdout) > 2 * 1024 * 1024:
                 return None
             return completed.stdout
-        except (OSError, subprocess.TimeoutExpired):
-            raise HTTPException(422, 'Видео получено, но извлечение кадров не удалось. Оригинал сохранён; анализ движения не выполнен.') from None
+        except OSError:
+            raise FFmpegToolError('unusable', f'Не удалось запустить ffmpeg. {VIDEO_TOOL_SETUP}') from None
+        except subprocess.TimeoutExpired:
+            raise FFmpegToolError('timeout', 'Извлечение кадров заняло слишком много времени. Попробуйте более короткий MP4 (H.264).') from None
     frames = {}
     for second in times:
         data = decode(second)
@@ -183,7 +260,7 @@ def _video_frames(path: Path, metadata):
             second = 0.0
             data = frames.get(second) or decode(second)
         if data is None:
-            raise HTTPException(422, 'Видео получено, но извлечение кадров не удалось. Оригинал сохранён; анализ движения не выполнен.')
+            raise FFmpegToolError('failed', 'FFmpeg не смог извлечь кадры. Попробуйте сохранить ролик как MP4 (H.264).')
         frames[second] = data
     return sorted(frames.items())
 
@@ -278,12 +355,15 @@ def upload_attachment(request: Request, response: Response, file: UploadFile = F
             else:
                 try:
                     frames = _video_frames(path, video)
-                    extracted = _video_observations(session, frames)
                     video['sample_times_seconds'] = [second for second, _ in frames]
+                    extracted = _video_observations(session, frames)
                     engine, analysis_kind = 'openai_vision', 'sampled_video_frames'
                     problems.append(f'Проанализированы только выборочные кадры: {len(frames)}. Непрерывное движение и звук не анализировались; причина неисправности по этим кадрам не подтверждена.')
+                except FFmpegToolError as exc:
+                    problems.append(f'Оригинал видео сохранён. {exc}')
+                    processing_status, error_code = 'failed', 'video_frames_' + exc.reason
                 except HTTPException as exc:
-                    problems.append(str(exc.detail))
+                    problems.append(f'Оригинал видео сохранён. Кадры извлечены, но модель не завершила обработку. {exc.detail}')
                     processing_status, error_code = 'failed', 'video_analysis_failed'
         else:
             validate_magic(path, suffix)

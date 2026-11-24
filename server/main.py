@@ -440,6 +440,10 @@ def message_dict(message: ChatMessage, session: Session | None = None, staff: bo
             elif source.get('solution_id'):
                 solution = session.get(workflows.VerifiedSolution, source['solution_id'], populate_existing=True)
                 allowed = bool(solution and solution.status == 'VERIFIED' and solution.visibility == 'public')
+            elif source.get('source_type') == 'official_web':
+                from .web_sources import public_web_source
+                source = public_web_source(source)
+                allowed = source is not None
             else:
                 allowed = False
             if not allowed:

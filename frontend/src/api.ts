@@ -40,4 +40,27 @@ export type Attachment={id:number|string;filename:string;size_bytes?:number;mime
 export type ConversationState={intent?:string;goal?:string;stage?:string;known_facts?:Record<string,unknown>;unconfirmed_facts?:Record<string,unknown>;missing_information?:string[];requested_action?:string;requires_human?:boolean;client_confirmed?:boolean;escalation_id?:number;task_status?:string;turn_count?:number};
 export type Escalation={id:number;conversation_id:string|number;case_id?:number;task_id?:number;status:string;reason:string;summary:string;known_facts?:Record<string,unknown>;missing_information?:string[];attempted_actions?:string[];document_sources?:Source[];attachments?:Attachment[];requested_action?:string;department?:string;priority?:string;assignee?:string;created_at:string;updated_at:string;conversation?:{id:number|string;title:string;messages:Message[]};state?:ConversationState};
 
-export function attachmentProcessingLabel(file:Attachment){if(file.kind!=='video'&&!/\.(?:mp4|webm|mov)$/i.test(file.filename||''))return '';if(file.processing_status==='failed'||file.processing_status==='missing')return 'Видео получено · обработка не удалась';if(file.processing_status==='processed'&&file.analysis_kind==='sampled_video_frames')return 'Просмотрены отдельные кадры · звук и движение не анализировались';return 'Видео получено · содержимое ещё не обработано';}
+function isVideo(file:Attachment){
+  return file.kind==='video'||/\.(?:mp4|webm|mov)$/i.test(file.filename||'');
+}
+
+export function attachmentProcessingLabel(file:Attachment){
+  if(!isVideo(file))return '';
+  if(file.processing_status==='missing')return 'Видео недоступно';
+  if(file.processing_status==='failed')return 'Видео получено · обработка не удалась';
+  if(file.processing_status==='processed'&&file.analysis_kind==='sampled_video_frames')return 'Просмотрены отдельные кадры · звук и движение не анализировались';
+  return 'Видео получено · содержимое ещё не обработано';
+}
+
+export function videoProcessingHint(file:Attachment){
+  if(!isVideo(file)||!['failed','missing','metadata_only'].includes(file.processing_status||''))return '';
+  const warning=file.warnings?.find(value=>typeof value==='string'&&value.trim());
+  if(warning)return warning;
+  if(file.processing_error_code==='missing_vision_key')return 'Для анализа кадров администратору нужно настроить модель OpenAI.';
+  if(file.processing_error_code==='video_probe_unavailable'||file.processing_error_code==='video_frames_unavailable'){
+    return 'Для обработки видео администратору нужно настроить FFmpeg и FFprobe.';
+  }
+  if(file.processing_status==='missing')return 'Файл не найден в хранилище.';
+  if(file.processing_status==='failed')return 'Можно прислать отдельный кадр с дисплеем или маркировкой оборудования.';
+  return '';
+}

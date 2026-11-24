@@ -76,6 +76,7 @@ _SAFE_KEYS = {
     'attachments_content_verified', 'model_learning_verified', 'body_read', 'bytes',
     'imap_status', 'response_code', 'transport_error_type',
     'citation_error', 'citation_source_index', 'citation_retry', 'reasoning_tokens', 'usage',
+    'web_lookup_status', 'web_lookup_error',
 }
 _NESTED_KEYS = {'models', 'diagnostics', 'provider_diagnostics', 'runtime', 'folders',
                 'source_ids', 'sources', 'validation_errors', 'samples', 'missing_variable_names',

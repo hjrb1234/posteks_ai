@@ -94,6 +94,11 @@ PROHIBITED_PROMISE = re.compile(r'(?:визит|выезд|встреча|бро
 UNSOURCED_SPEC = re.compile(r'\d+(?:[.,]\d+)?\s*(?:мм|см|кВт|об/мин|вольт|бар)\b|(?:аналог|ремень|деталь)\s+(?:точно\s+)?(?:совместим|подойд[её]т)', re.I)
 _BUSINESS = re.compile(r'\b(?:сч[её]т(?:а|у|ом|е|ы|ов)?|оплат\w*|накладн\w*|спецификац\w*|коммерческ\w*|заказ(?:а|у|ом|е|ы|ов)?|доставк\w*|отгруз\w*|цен(?:а|у|ы|ой|е)|стоимост\w*|сколько\s+сто(?:ит|ят)|поч[её]м|прайс\w*)\b', re.I)
 _TECHNICAL = re.compile(r'\b(?:машин\w*|оборудован\w*|упаков\w*|формиров\w*|заклей\w*|конвейер\w*|датчик\w*|рем[её]н\w*|привод\w*|транспортер\w*|короб\w*|лот(?:ок|к\w*))\b', re.I)
+_DRIVE_MODEL = re.compile(r'\b(?:VEICHI|ВЕЙЧИ|ВЭЙЧИ)\s+SD\s*[-–]?\s*(\d{3,4})(?![\w-])', re.I)
+_DRIVE_ALARM = re.compile(r'\bER\s*[.:-]?\s*(\d{3,4})\b', re.I)
+_DRIVE = re.compile(r'\b(?:привод\w*|сервоусилител\w*|сервопривод\w*)\b', re.I)
+_STOP = re.compile(r'\b(?:останов\w*|останавлив\w*|замира\w*|завис\w*|вста[её]\w*)\b', re.I)
+_STOP_TIMING = re.compile(r'\b(?:периодическ\w*|иногда|нерегулярно|каждый\s+раз\s+после|после\s+захвата|до\s+сброса)\b', re.I)
 _SCHOOL = re.compile(r'\b(?:дз|домашн\w*\s+(?:задани\w*|работ\w*)|homework|schoolwork)\b', re.I)
 _UNRELATED = re.compile(r'\b(?:математик\w*|алгебр\w*|геометри\w*|тригонометри\w*|сочинени\w*|реферат\w*|стих(?:отворени\w*|и|а|у|ом|е|ов)?|сказк\w*|анекдот\w*|гороскоп\w*|астролог\w*|рецепт\w*|кулинар\w*|приготов(?:ить|лени\w*)|блюд\w*|пицц\w*|борщ\w*)\b', re.I)
 _UNAVAILABLE = re.compile(r'не\s+(?:знаю|понимаю|умею)|не\s+могу.{0,35}(?:определ|сфотограф|прочита)|(?:надпис\w*|маркировк\w*).{0,20}(?:ст[её]рт|не\s+вид|отсутств)', re.I)
@@ -149,7 +154,8 @@ def route_turn(message: str, state: dict, equipment_model=None, attachments=None
     current = str(message or '')[:6000]
     attached = '\n'.join((str(item.get('filename', ''))[:240] + '\n' + str(item.get('text', ''))[:4000])
                          for item in (attachments or [])[:12] if isinstance(item, dict))
-    technical = bool(_TECHNICAL.search(current) or detect_models(current))
+    technical = bool(_TECHNICAL.search(current) or detect_models(current)
+                     or _DRIVE_MODEL.search(current) or _DRIVE_ALARM.search(current))
     attached_technical = bool(_TECHNICAL.search(attached) or detect_models(attached))
     task = bool(re.search(r'реши\w*|сдела\w*|выполни\w*|напиши\w*|помоги|solve|answer', current, re.I))
     equation = bool(re.search(r'(?:\b[xyz]\b|[xyz][²³^])[^\n]{0,80}=|\b(?:уравнени\w*|equation)\b', current + '\n' + attached, re.I))
@@ -245,6 +251,53 @@ def _repeats_unknown_question(plan, state: dict, message: str) -> bool:
     unavailable_photo = bool(re.search(r'не\s+могу.{0,35}(?:сфотограф|сним)|нет.{0,25}(?:фото|сним)', message, re.I)
                              and re.search(r'(?:пришлите|сделайте|отправьте).{0,50}(?:фото|сним)', text, re.I))
     return repeated_parameter or near_duplicate or unavailable_photo
+
+
+def _drive_value(pattern, text: str, prefix: str) -> tuple[str, str] | None:
+    matches = list(pattern.finditer(text))
+    if len({match.group(1) for match in matches}) != 1:
+        return None
+    match = matches[0]
+    if re.search(r'\bне\s*$', text[:match.start()], re.I):
+        return None
+    return prefix + match.group(1), match.group(0)
+
+
+def _remember_drive_details(state: dict, message: str) -> dict:
+    reported = {}
+    for key, pattern, prefix in (('component_model', _DRIVE_MODEL, 'Veichi SD'),
+                                 ('alarm_code', _DRIVE_ALARM, 'Er.')):
+        finding = _drive_value(pattern, message, prefix)
+        if finding:
+            value, quote = finding
+            reported[key] = value
+            state['known_facts'][key] = value
+            state['fact_provenance'][key] = {
+                'quote': quote, 'origin': 'customer_report', 'turn': state['turn_count'] + 1,
+            }
+    return reported
+
+
+def _intermittent_drive_stop(text: str) -> bool:
+    return bool(_DRIVE.search(text) and _STOP.search(text) and _STOP_TIMING.search(text))
+
+
+def _drive_observation(turn: dict) -> str:
+    if turn.get('intermittent_stop'):
+        return ('При такой остановке полезно различить два состояния: на дисплее привода есть аварийный код '
+                'или код отсутствует, а панель машины показывает ожидание шага. Если уже видели показания до сброса, '
+                'напишите, что было на обоих экранах. Если остановка повторится сама, снимите показания только с безопасного места. '
+                'Не сдвигайте механизм руками, не открывайте шкаф и не запускайте машину специально для проверки.')
+    if turn.get('drive_alarm_followup'):
+        model, code = turn.get('component_model'), turn['alarm_code']
+        intro = f'Модель привода {model} зафиксирована. ' if model else ''
+        return (intro + f'Уточните по уже произошедшему эпизоду: {code} появился при включении, при пуске движения '
+                'или во время рабочего цикла? Если на штатной панели было дополнительное сообщение, пришлите его. '
+                'До сверки с руководством и специалистом не меняйте ноль энкодера и параметры привода.')
+    if turn.get('component_model_supplied'):
+        return (f'Модель привода {turn["component_model"]} зафиксирована. Опишите симптом и в какой момент рабочего цикла '
+                'он проявляется. Если на штатной панели уже был аварийный код или сообщение, пришлите его целиком.')
+    return ''
 
 
 class StrictModel(BaseModel):
@@ -564,6 +617,7 @@ def _respond(session: Session, message: str, *, conversation: Conversation | Non
     # An explicit UI model is a user choice, never a verified machine parameter.
     if routing['domain'] != 'commercial' and equipment_model and len(detect_models(equipment_model)) == 1:
         state['known_facts'].setdefault('equipment_model', normalize_model(equipment_model))
+    drive_report = _remember_drive_details(state, message[:6000]) if routing['domain'] == 'technical' else {}
     for report in _reported_checks(message):
         if report not in state['attempted_actions']:
             state['attempted_actions'] = (state['attempted_actions'] + [report])[-30:]
@@ -581,6 +635,25 @@ def _respond(session: Session, message: str, *, conversation: Conversation | Non
         bounded['text'] = str(item.get('text', ''))[:min(attachment_budget, 4000)]
         attachment_budget -= len(bounded['text'])
         attachment_context.append(bounded)
+    if routing['domain'] == 'technical':
+        routing['web_lookup_allowed'] = bool(use_knowledge and document_id is None and not conflict and not unsafe_operation)
+        prior_user_turns = [str(item.get('content', ''))[:3000] for item in (history or [])[-10:]
+                            if isinstance(item, dict) and item.get('role') == 'user'] if not routing['topic_change'] else []
+        used_attachments = [item['text'] for item in attachment_context if item.get('content_processed') and
+                            (not routing['topic_change'] or item.get('current_turn'))]
+        known = state['known_facts']
+        inferred_alarm = next((finding[0] for text in [*reversed(prior_user_turns), *used_attachments]
+                               if (finding := _drive_value(_DRIVE_ALARM, text, 'Er.'))), None)
+        if component_model := known.get('component_model'):
+            routing['component_model'] = component_model
+            routing['component_model_supplied'] = 'component_model' in drive_report
+        if alarm_code := known.get('alarm_code') or inferred_alarm:
+            routing['alarm_code'] = alarm_code
+            routing['drive_alarm_followup'] = bool(drive_report or re.search(r'энкодер\w*', message, re.I))
+        if _intermittent_drive_stop(message) or ('component_model' in drive_report and any(
+                _intermittent_drive_stop(text) for text in [state.get('goal', ''), *prior_user_turns])):
+            routing['intermittent_stop'] = True
+    observation = _drive_observation(routing)
     planner_state = deepcopy(state)
     planner_state.pop('past_topics', None)
     from .response_integrity import source_conflicts, reply_violation
@@ -610,6 +683,8 @@ def _respond(session: Session, message: str, *, conversation: Conversation | Non
                     raw = local_plan(context)
             else:
                 engine = 'openai'
+                sources = meta.pop('answer_sources', sources)
+                conflicts = source_conflicts(sources)
         plan = ActionPlan.model_validate(raw) if raw is not None else None
     except Exception as exc:
         from .ai import safe_api_error
@@ -642,6 +717,10 @@ def _respond(session: Session, message: str, *, conversation: Conversation | Non
             row.updated_at = utcnow()
             session.commit()
         content = explanation + ' Ответ языковой модели не получен или не прошёл проверку; техническую консультацию я не подменяю. Сообщение и вложения сохранены в этом диалоге.'
+        if unsafe_operation:
+            content += '\n\n' + _safe_operation_response()
+        elif observation:
+            content += '\n\n' + observation
         return {'content': content, 'sources': [], 'engine': 'unavailable', 'planning_mode': 'provider_error',
             'action': 'retry', 'proposed_action': 'retry', 'missing_information': [], 'state': public_state(state),
             'equipment_model': state['known_facts'].get('equipment_model'), 'escalation': None,
@@ -673,6 +752,12 @@ def _respond(session: Session, message: str, *, conversation: Conversation | Non
             'action': 'explain', 'response_kind': 'identification', 'technical_claims': [],
             'missing_information': [key for key in plan.missing_information if key not in (state.get('missing_information') or [])]})
     unsafe_operation = unsafe_operation or dangerous_operation(plan.response) or any(dangerous_operation(c.text) for c in plan.technical_claims)
+    if (observation and not unsafe_operation and not plan.technical_claims and not plan.safety.stop_remote
+            and not plan.requires_human and plan.requested_action == 'none'
+            and plan.response_kind != 'organizational'
+            and plan.action in {'answer', 'explain', 'request_information', 'request_photo'}):
+        plan = plan.model_copy(update={'response': observation, 'stage': 'collecting_details',
+            'response_kind': 'clarification', 'action': 'request_information', 'missing_information': []})
     if unsafe_operation:
         # This gate applies to injected/provider plans as well as the local
         # planner. A source citation must not authorize reaching into a running
@@ -764,7 +849,9 @@ def _respond(session: Session, message: str, *, conversation: Conversation | Non
     new_refs = _source_refs(sources)
     # Retain identifiers across long conversations, never private source excerpts.
     refs = state.get('source_refs', []) + new_refs
-    state['source_refs'] = list({str((r.get('document_id'), r.get('solution_id'), r.get('equipment_id'), r.get('page'))): r for r in refs}.values())[-30:]
+    state['source_refs'] = list({(r.get('document_id'), r.get('solution_id'), r.get('equipment_id'), r.get('page'),
+                                 r.get('url') if r.get('source_type') == 'official_web' else None): r
+                                 for r in refs}.values())[-30:]
     remembered_files = {a['id']: a for a in state.get('attachments', []) if a.get('id')}
     for attachment in attachment_context:
         if isinstance(attachment, dict) and attachment.get('id'):

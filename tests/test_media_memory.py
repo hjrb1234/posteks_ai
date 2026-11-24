@@ -106,6 +106,62 @@ def test_video_probe_failure_preserves_original_and_reports_received_failed(env,
         assert previous[0]['processing_status'] == 'failed' and not previous[0]['text']
 
 
+def test_video_without_tools_has_actionable_warning_and_preserves_original(env, monkeypatch):
+    monkeypatch.delenv('FFPROBE_PATH', raising=False)
+    monkeypatch.delenv('FFMPEG_PATH', raising=False)
+    monkeypatch.setattr(media, '_IS_WINDOWS', False)
+    monkeypatch.setattr(media.shutil, 'which', lambda _: None)
+    upload = b'\x00\x00\x00\x14ftypmp42'
+    response = env.client.post('/api/attachments', files={'file': ('sample.mp4', upload, 'video/mp4')})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['processing_status'] == 'failed' and payload['content_processed'] is False
+    assert payload['processing_error_code'] == 'video_probe_unavailable'
+    assert 'FFPROBE_PATH' in payload['warnings'][0]
+    assert env.client.get(payload['url']).content == upload
+
+
+def test_video_reports_invalid_decoder_configuration_before_provider_call(env, video_bytes, monkeypatch):
+    monkeypatch.setenv('FFMPEG_PATH', str(env.tmp_path / 'unavailable-ffmpeg'))
+    monkeypatch.setattr(media.settings, 'openai_api_key', 'fixture-only')
+    monkeypatch.setattr(media, '_video_observations', lambda *_: pytest.fail('Should not call OpenAI'))
+    response = env.client.post('/api/attachments', files={'file': ('sample.mp4', video_bytes, 'video/mp4')})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['video']['width'] == 64
+    assert payload['processing_error_code'] == 'video_frames_configuration'
+    assert 'FFMPEG_PATH' in payload['warnings'][0]
+    assert str(env.tmp_path) not in payload['warnings'][0]
+    assert env.client.get(payload['url']).content == video_bytes
+
+
+def test_video_probe_uses_container_duration_when_stream_duration_is_unavailable(env, monkeypatch):
+    monkeypatch.setattr(media, '_ffmpeg_binary', lambda _: 'fixture-ffprobe')
+    monkeypatch.setattr(media.subprocess, 'run', lambda *_args, **_kwargs: subprocess.CompletedProcess(
+        'fixture-ffprobe', 0, b'{"streams":[{"width":64,"height":48,"duration":"N/A"}],"format":{"duration":"2.0"}}'))
+    metadata, code, _ = media._video_probe(env.tmp_path / 'sample.webm')
+    assert code is None and metadata['duration_seconds'] == 2.0
+
+
+def test_video_tools_find_windows_winget_links_and_check_programs_run(env, monkeypatch):
+    monkeypatch.setattr(media, '_IS_WINDOWS', True)
+    monkeypatch.delenv('FFMPEG_PATH', raising=False)
+    monkeypatch.delenv('FFPROBE_PATH', raising=False)
+    monkeypatch.setenv('LOCALAPPDATA', str(env.tmp_path))
+    directory = env.tmp_path / 'Microsoft' / 'WinGet' / 'Links'
+    probe, encoder = map(lambda name: str(directory / name), ('ffprobe.exe', 'ffmpeg.exe'))
+    monkeypatch.setattr(media.shutil, 'which', lambda path: path if path in (probe, encoder) else None)
+    calls = []
+
+    def run(args, **_kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, int(args[0] == encoder))
+
+    monkeypatch.setattr(media.subprocess, 'run', run)
+    assert media.video_tool_status() == {'ffprobe': 'ready', 'ffmpeg': 'unusable'}
+    assert calls == [[probe, '-version'], [encoder, '-version']]
+
+
 def test_conversation_remembers_file_without_resending_and_rejects_other_owner(env):
     response = env.client.post('/api/attachments', files={'file': ('plate.txt', 'Модель PE38-12. Датчик уже проверили.'.encode(), 'text/plain')})
     assert response.status_code == 200

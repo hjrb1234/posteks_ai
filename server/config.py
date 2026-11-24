@@ -31,6 +31,8 @@ class Settings:
     openai_vision_model: str = field(default_factory=lambda: os.getenv('OPENAI_VISION_MODEL', 'gpt-4.1-mini'))
     openai_audio_model: str = field(default_factory=lambda: os.getenv('OPENAI_AUDIO_MODEL', os.getenv('OPENAI_TRANSCRIPTION_MODEL', 'gpt-4o-mini-transcribe')))
     openai_embedding_model: str = field(default_factory=lambda: os.getenv('OPENAI_EMBEDDING_MODEL', os.getenv('OPENAI_EMBED_MODEL', 'text-embedding-3-small')))
+    web_search_enabled: bool = field(default_factory=lambda: flag('POSTEKS_WEB_SEARCH_ENABLED', True))
+    web_search_domains: str = field(default_factory=lambda: os.getenv('POSTEKS_WEB_SEARCH_DOMAINS', 'veichi.com,posteks.ru'))
     public_base_url: str = field(default_factory=lambda: os.getenv('PUBLIC_BASE_URL', '').rstrip('/'))
     allowed_origins: str = field(default_factory=lambda: os.getenv('ALLOWED_ORIGINS', ''))
     max_ai_output_tokens: int = field(default_factory=lambda: int(os.getenv('MAX_AI_OUTPUT_TOKENS', '4096')))

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowUp, ArrowUpRight, Check, ChevronDown, CircleHelp, Copy, FileText, Headphones, Loader2, PackageSearch, Search, Sparkles, ShieldCheck, LockKeyhole, X, ExternalLink, BookOpen, Wrench, Mic, Square, Paperclip, Send, UserRound, AlertCircle } from 'lucide-react';
-import { api, EQUIPMENT, errorMessage, upload, bytes, modelUnavailable, responseMessage, attachmentProcessingLabel } from './api';
+import { ArrowUp, ArrowUpRight, Check, ChevronDown, CircleHelp, Copy, FileText, Globe, Headphones, Loader2, PackageSearch, Search, Sparkles, ShieldCheck, LockKeyhole, X, ExternalLink, BookOpen, Wrench, Mic, Square, Paperclip, Send, UserRound, AlertCircle } from 'lucide-react';
+import { api, EQUIPMENT, errorMessage, upload, bytes, modelUnavailable, responseMessage, attachmentProcessingLabel, videoProcessingHint } from './api';
 import type { Health, Message, Source, ConversationState, Attachment } from './api';
 
 function DocumentSourceDrawer({source,onClose}:{source:Source;onClose:()=>void}){
@@ -15,7 +15,43 @@ function DocumentSourceDrawer({source,onClose}:{source:Source;onClose:()=>void})
 }
 
 
-export function SourceDrawer({source,onClose}:{source:Source;onClose:()=>void}){if(source.source_type==='equipment_registry'||source.equipment_id)return <EquipmentSourceDrawer source={source} onClose={onClose}/>;return source.source_type==='verified_solution'||source.solution_id?<SolutionSourceDrawer source={source} onClose={onClose}/>:<DocumentSourceDrawer key={`${source.document_id}-${source.page}-${source.original_private}-${source.file_available}`} source={source} onClose={onClose}/>;}
+function officialSourceUrl(value:Source['url']){
+  if(!value)return null;
+  try{
+    const url=new URL(value);
+    return url.protocol==='https:'&&!url.username&&!url.password?url:null;
+  }catch{return null;}
+}
+
+function OfficialSourceDrawer({source,onClose}:{source:Source;onClose:()=>void}){
+  const url=officialSourceUrl(source.url);
+  useEffect(()=>{
+    const close=(event:KeyboardEvent)=>{if(event.key==='Escape')onClose();};
+    window.addEventListener('keydown',close);
+    return()=>window.removeEventListener('keydown',close);
+  },[onClose]);
+  return <div className="drawer-backdrop" onMouseDown={onClose}>
+    <section className="source-drawer" role="dialog" aria-modal="true" aria-label="Официальный источник" onMouseDown={event=>event.stopPropagation()}>
+      <div className="drawer-heading">
+        <span className="metric-icon"><Globe size={20}/></span>
+        <div><span className="eyebrow">{url?.hostname||'ОФИЦИАЛЬНЫЙ ИСТОЧНИК'}</span><h2>{source.title||'Документация производителя'}</h2></div>
+        <button className="icon-button" aria-label="Закрыть источник" onClick={onClose}><X size={20}/></button>
+      </div>
+      <div className="source-toolbar">
+        {!!source.page&&<span className="badge orange">Страница {source.page}</span>}
+        {url&&<a className="button secondary small" href={url.href} target="_blank" rel="noreferrer">Открыть на сайте производителя <ExternalLink size={14}/></a>}
+      </div>
+      <div className="source-text"><h3>Фрагмент источника</h3><p>{source.text||source.excerpt||'Фрагмент источника недоступен.'}</p></div>
+    </section>
+  </div>;
+}
+
+export function SourceDrawer({source,onClose}:{source:Source;onClose:()=>void}){
+  if(source.source_type==='official_web')return <OfficialSourceDrawer source={source} onClose={onClose}/>;
+  if(source.source_type==='equipment_registry'||source.equipment_id)return <EquipmentSourceDrawer source={source} onClose={onClose}/>;
+  if(source.source_type==='verified_solution'||source.solution_id)return <SolutionSourceDrawer source={source} onClose={onClose}/>;
+  return <DocumentSourceDrawer key={`${source.document_id}-${source.page}-${source.original_private}-${source.file_available}`} source={source} onClose={onClose}/>;
+}
 function EquipmentSourceDrawer({source,onClose}:{source:Source;onClose:()=>void}){
  const[record,setRecord]=useState<any>(null),[error,setError]=useState('');
  useEffect(()=>{api(`/equipment/${source.equipment_id}/evidence`).then(setRecord).catch(err=>setError(errorMessage(err)));},[source.equipment_id]);
@@ -36,12 +72,34 @@ export function MessageContent({content}:{content:string}){
     return <p key={index}>{paragraph.split(/(\*\*[^*]+\*\*)/).map((part,i)=>part.startsWith('**')?<strong key={i}>{part.slice(2,-2)}</strong>:part)}</p>;
   })}</div>
 }
-export function SourceCards({sources,onOpen}:{sources:Source[];onOpen:(source:Source)=>void}){return <div className="source-cards">{sources.map((source,index)=>{const solution=source.source_type==='verified_solution'||source.solution_id,registry=source.source_type==='equipment_registry'||source.equipment_id;return <button key={`${source.document_id||source.solution_id||source.equipment_id}-${source.page}-${index}`} className="source-card" onClick={()=>onOpen(source)}>{registry?<PackageSearch size={16}/>:solution?<ShieldCheck size={16}/>:<FileText size={16}/>}<span><strong>{source.title||source.filename||'Документация'}</strong><small>{registry?'Реестр · только сотрудники':solution?'Проверенное решение':`Страница ${source.page||1}`}{source.model?` · ${source.model}`:''}</small></span><ArrowUpRight size={14}/></button>;})}</div>}
+export function SourceCards({sources,onOpen}:{sources:Source[];onOpen:(source:Source)=>void}){
+  return <div className="source-cards">{sources.map((source,index)=>{
+    const official=source.source_type==='official_web';
+    const registry=source.source_type==='equipment_registry'||source.equipment_id;
+    const solution=source.source_type==='verified_solution'||source.solution_id;
+    const Icon=official?Globe:registry?PackageSearch:solution?ShieldCheck:FileText;
+    const label=official
+      ?[officialSourceUrl(source.url)?.hostname||'Официальный источник',source.page&&`Страница ${source.page}`].filter(Boolean).join(' · ')
+      :registry?'Реестр · только сотрудники':solution?'Проверенное решение':`Страница ${source.page||1}`;
+    return <button key={`${source.document_id||source.solution_id||source.equipment_id||source.url}-${source.page}-${index}`} className="source-card" onClick={()=>onOpen(source)}>
+      <Icon size={16}/>
+      <span><strong>{source.title||source.filename||'Документация'}</strong><small>{label}{source.model?` · ${source.model}`:''}</small></span>
+      <ArrowUpRight size={14}/>
+    </button>;
+  })}</div>;
+}
 
 const starters=[{Icon:Wrench,title:'Помочь с неисправностью',text:'Разберёмся, что случилось',prompt:'Помогите разобраться с неисправностью оборудования. Какие данные нужны для диагностики?'},{Icon:BookOpen,title:'Найти в инструкции',text:'Ответ со ссылкой на страницу',prompt:'Какие инструкции по оборудованию доступны? Помогите найти нужный раздел.'},{Icon:PackageSearch,title:'Подобрать запчасть',text:'По узлу или серийному номеру',prompt:'Нужна запасная часть. Какие сведения об оборудовании и узле необходимо указать?'},{Icon:Headphones,title:'Обратиться в сервис',text:'Подготовить данные для инженера',prompt:'Как подготовить обращение в сервис ПОСТЭКС? Какие сведения нужно собрать?'}];
 
 const escalationStatuses:Record<string,string>={queued:'В очереди специалиста',in_progress:'Специалист работает над вопросом',waiting_client:'Нужны сведения от вас',waiting_approval:'Ожидает согласования',resolved:'Обращение закрыто',cancelled:'Запрос отменён'};
-function MessageAttachments({files}:{files?:Attachment[]}){return files?.length?<div className="chat-message-attachments">{files.map(file=><a key={file.id} className="chat-file" href={file.download_url||file.url||`/api/attachments/${file.id}/file`} target="_blank" rel="noreferrer"><FileText size={18}/><span>{file.filename}<small>{bytes(file.size_bytes)}{attachmentProcessingLabel(file)&&<> · {attachmentProcessingLabel(file)}</>}</small></span><ExternalLink size={14}/></a>)}</div>:null;}
+function MessageAttachments({files}:{files?:Attachment[]}){
+  return files?.length?<div className="chat-message-attachments">{files.map(file=>{
+    const label=attachmentProcessingLabel(file),hint=videoProcessingHint(file);
+    return <a key={file.id} className="chat-file" href={file.download_url||file.url||`/api/attachments/${file.id}/file`} target="_blank" rel="noreferrer">
+      <FileText size={18}/><span>{file.filename}<small>{bytes(file.size_bytes)}{label&&` · ${label}`}</small>{hint&&<small>{hint}</small>}</span><ExternalLink size={14}/>
+    </a>;
+  })}</div>:null;
+}
 export default function Chat({conversationId,health,onNavigate,onConversationChanged}:{conversationId?:string;health:Health|null;onNavigate:(path:string)=>void;onConversationChanged:()=>void}){
  const[messages,setMessages]=useState<Message[]>([]),[input,setInput]=useState(''),[model,setModel]=useState(''),[busy,setBusy]=useState(false),[loading,setLoading]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState(''),[source,setSource]=useState<Source|null>(null),[copied,setCopied]=useState<string|number|null>(null),[state,setState]=useState<ConversationState|null>(null),[escalation,setEscalation]=useState<any>(null),[handoffOpen,setHandoffOpen]=useState(false),[handoffReason,setHandoffReason]=useState(''),[requestedAction,setRequestedAction]=useState('remote_consultation'),[handoffBusy,setHandoffBusy]=useState(false),[attachments,setAttachments]=useState<Attachment[]>([]),[uploading,setUploading]=useState(false),[recording,setRecording]=useState(false),[transcribing,setTranscribing]=useState(false);
  const bottomRef=useRef<HTMLDivElement>(null),inputRef=useRef<HTMLTextAreaElement>(null),fileRef=useRef<HTMLInputElement>(null),activeId=useRef(conversationId),pendingConversation=useRef(''),recorder=useRef<MediaRecorder|null>(null),stream=useRef<MediaStream|null>(null),recordingTimer=useRef<ReturnType<typeof setTimeout>|null>(null);
@@ -53,7 +111,24 @@ export default function Chat({conversationId,health,onNavigate,onConversationCha
  async function send(value=input){const message=value.trim()||(attachments.length?'Проверьте приложенные файлы.':'');if(!message||busy||uploading||recording)return;const previous=messages,currentFiles=attachments;setInput('');setAttachments([]);setError('');setNotice('');setBusy(true);setMessages([...previous,{id:`local-${Date.now()}`,role:'user',content:message,attachments:currentFiles}]);try{const result=await api<any>('/chat',{method:'POST',body:JSON.stringify({message,conversation_id:conversationId||undefined,model:model||undefined,attachment_ids:currentFiles.map(file=>String(file.id))})});setMessages(current=>[...current,responseMessage(result)]);setState(result.state||null);setEscalation(result.escalation||null);if(!conversationId&&result.conversation_id){pendingConversation.current=String(result.conversation_id);onNavigate(`/chat/${result.conversation_id}`);}onConversationChanged();}catch(err){setError(errorMessage(err));setInput(value);setAttachments(currentFiles);setMessages(previous);}finally{setBusy(false);inputRef.current?.focus();}}
  async function copy(message:Message){try{if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(message.content);else{const area=document.createElement('textarea');area.value=message.content;area.style.position='fixed';area.style.opacity='0';document.body.appendChild(area);area.select();const success=document.execCommand('copy');area.remove();if(!success)throw new Error('clipboard');}setCopied(message.id);setTimeout(()=>setCopied(null),2200);}catch{setError('Браузер не разрешил копирование. Выделите текст ответа вручную.');}}
  async function handoff(){setHandoffBusy(true);setError('');try{let id=conversationId;if(!id){const question=handoffReason.trim()||'Мне нужна дистанционная консультация специалиста.';const result=await api<any>('/chat',{method:'POST',body:JSON.stringify({message:question,model:model||undefined})});id=String(result.conversation_id);setMessages([{id:`u-${Date.now()}`,role:'user',content:question},responseMessage(result)]);pendingConversation.current=id;activeId.current=id;onNavigate(`/chat/${id}`);}const result=await api<any>(`/conversations/${id}/escalate`,{method:'POST',body:JSON.stringify({reason:handoffReason.trim()||undefined,requested_action:requestedAction})});setEscalation(result);setState(old=>({...old,escalation_id:result.id,task_status:result.status}));setNotice(result.notice||'Запрос передан специалисту вместе с историей диалога. Дата и условия консультации требуют согласования.');setHandoffOpen(false);await reloadConversation(id!);onConversationChanged();}catch(err){setError(errorMessage(err));}finally{setHandoffBusy(false);}}
- async function addFiles(files:File[]){if(!files.length)return;if(attachments.length+files.length>4){setError('К одному сообщению можно приложить не больше четырёх файлов.');return;}setUploading(true);setError('');try{const added:Attachment[]=[];for(const file of files){const result=await upload<any>('/attachments',[file],'file',conversationId?{conversation_id:conversationId}:{});added.push({...result,size_bytes:result.size_bytes||file.size});if(result.warnings?.length)setNotice(result.warnings.join(' '));}setAttachments(current=>[...current,...added]);}catch(err){setError(errorMessage(err));}finally{setUploading(false);if(fileRef.current)fileRef.current.value='';}}
+ async function addFiles(files:File[]){
+  if(!files.length)return;
+  if(attachments.length+files.length>4){setError('К одному сообщению можно приложить не больше четырёх файлов.');return;}
+  setUploading(true);setError('');setNotice('');
+  const added:Attachment[]=[];
+  try{
+    for(const file of files){
+      const result=await upload<Attachment>('/attachments',[file],'file',conversationId?{conversation_id:conversationId}:{});
+      added.push({...result,size_bytes:result.size_bytes||file.size});
+    }
+  }catch(err){setError(errorMessage(err));}
+  finally{
+    setAttachments(current=>[...current,...added]);
+    setNotice(added.map(file=>videoProcessingHint(file)||file.warnings?.join(' ')).filter(Boolean).join(' '));
+    setUploading(false);
+    if(fileRef.current)fileRef.current.value='';
+  }
+ }
  async function toggleVoice(){if(recording){if(recordingTimer.current)clearTimeout(recordingTimer.current);recorder.current?.stop();setRecording(false);return;}setError('');if(!navigator.mediaDevices?.getUserMedia||!window.MediaRecorder){setError('Голосовой ввод недоступен в этом браузере. Используйте современный браузер на localhost или HTTPS.');return;}try{stream.current=await navigator.mediaDevices.getUserMedia({audio:true});const parts:BlobPart[]=[];const current=new MediaRecorder(stream.current);recorder.current=current;current.ondataavailable=event=>{if(event.data.size)parts.push(event.data);};current.onstop=async()=>{if(recordingTimer.current)clearTimeout(recordingTimer.current);stream.current?.getTracks().forEach(track=>track.stop());setRecording(false);setTranscribing(true);try{const type=current.mimeType||'audio/webm';const file=new File([new Blob(parts,{type})],type.includes('mp4')?'voice.m4a':'voice.webm',{type});const result=await upload<{text:string;warnings?:string[]}>('/audio/transcribe',[file],'file');setInput(value=>[value,result.text].filter(Boolean).join('\n'));setNotice(['Речь распознана. Проверьте текст перед отправкой.',...(result.warnings||[])].join(' '));inputRef.current?.focus();}catch(err){setError(errorMessage(err));}finally{setTranscribing(false);}};current.start();setRecording(true);recordingTimer.current=setTimeout(()=>{if(current.state==='recording'){current.stop();setNotice('Запись остановлена: не более двух минут на одно сообщение.');}},120000);}catch{setError('Нет доступа к микрофону. Разрешите его в настройках браузера или напишите вопрос.');}}
  const empty=!messages.length&&!loading,escalationId=escalation?.id||state?.escalation_id,escalationStatus=escalation?.status||state?.task_status||'queued';
  return <div className="chat-page"><header className="chat-header"><div className="chat-title">Сервисный помощник <span className="badge subtle">AI</span></div><div className="chat-header-actions"><button className="button secondary small" onClick={()=>setHandoffOpen(true)} disabled={busy||handoffBusy}><Headphones size={16}/><span>Позвать специалиста</span></button><div className="equipment-picker"><PackageSearch size={15}/><label className="sr-only" htmlFor="chat-equipment">Модель оборудования</label><select id="chat-equipment" value={model} onChange={event=>setModel(event.target.value)}><option value="">Выбрать оборудование</option>{EQUIPMENT.map(item=><option key={item}>{item}</option>)}</select><ChevronDown size={14}/></div></div></header>{escalationId&&<div className="client-handoff-status" role="status"><Headphones size={17}/><div><strong>Запрос #{escalationId} · {escalationStatuses[escalationStatus]||escalationStatus}</strong><span>Ответ специалиста появится в этом диалоге. Повторно описывать ситуацию не нужно.</span></div><button className="icon-button" aria-label="Обновить ответы специалиста" onClick={()=>conversationId&&void reloadConversation(conversationId).catch(err=>setError(errorMessage(err)))}><RefreshIcon/></button></div>}

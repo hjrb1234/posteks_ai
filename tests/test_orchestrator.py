@@ -61,6 +61,90 @@ def plan(context, **changes):
     return output
 
 
+def test_drive_model_followup_keeps_machine_and_alarm_separate(storage, monkeypatch):
+    from server import ai
+
+    turns = []
+
+    def provider(session, context, selected_model=None):
+        turns.append(deepcopy(context))
+        return plan(context, response='Уточните точную модель привода.', missing_information=['component_model']), {}
+
+    monkeypatch.setattr(ai, 'generate_plan', provider)
+    with storage() as session:
+        item = conversation(session)
+        respond(session, 'PE38-12: как установить ноль энкодера при Er.810?', conversation=item, require_model=True)
+        outcome = respond(session, 'Модель Veichi SD700', conversation=item, require_model=True)
+
+        assert turns[-1]['current_turn']['component_model'] == 'Veichi SD700'
+        assert turns[-1]['current_turn']['alarm_code'] == 'Er.810'
+        assert outcome['state']['known_facts']['equipment_model'] == 'PE38-12'
+        assert outcome['state']['known_facts']['component_model'] == 'Veichi SD700'
+        assert outcome['state']['known_facts']['alarm_code'] == 'Er.810'
+        assert not outcome['missing_information']
+        assert 'Уточните точную модель привода' not in outcome['content']
+        assert 'при включении' in outcome['content']
+        assert 'не меняйте ноль энкодера' in outcome['content']
+
+
+def test_drive_model_followup_without_readable_alarm_does_not_repeat_model_question(storage):
+    with storage() as session:
+        item = conversation(session)
+        respond(session, 'Нужна помощь с нулём энкодера', conversation=item)
+        outcome = respond(session, 'Модель Veichi SD700', conversation=item)
+
+        assert outcome['state']['known_facts']['component_model'] == 'Veichi SD700'
+        assert outcome['state']['known_facts'].get('equipment_model') is None
+        assert outcome['missing_information'] == []
+        assert 'Модель привода Veichi SD700 зафиксирована' in outcome['content']
+        assert 'код или сообщение' in outcome['content']
+
+
+def test_intermittent_drive_stop_offers_safe_observation_without_a_model(storage):
+    with storage() as session:
+        outcome = respond(session,
+            'Периодически, привод останавливается после захвата брикетов. Как будто чего то ждёт. '
+            'Пока вручную влево вправо руками не подвигать, сброс, запуск машина начинает работать. Укладка в коробку',
+            conversation=conversation(session), require_model=True)
+
+        assert outcome['engine'] == 'unavailable'
+        assert 'аварийный код' in outcome['content'] and 'ожидание шага' in outcome['content']
+        assert 'до сброса' in outcome['content']
+        assert 'Не сдвигайте механизм руками' in outcome['content']
+        assert outcome['sources'] == []
+
+
+def test_drive_observation_keeps_unsafe_operation_guard(storage):
+    with storage() as session:
+        outcome = respond(session,
+            'Привод периодически останавливается после захвата. Можно поправить его рукой на ходу?',
+            conversation=conversation(session), planner=local_plan)
+
+        assert 'Не поправляйте' in outcome['content']
+        assert 'панель машины показывает ожидание' not in outcome['content']
+
+
+def test_provider_answer_sources_are_used_by_grounding_and_returned(storage, monkeypatch):
+    from server import ai
+
+    web = {'source_type': 'official_web', 'title': 'Руководство привода',
+           'url': 'https://example.test/drive.pdf', 'text': 'Зафиксируйте сообщение панели.'}
+
+    def provider(session, context, selected_model=None):
+        claim = {'source_index': 1, 'text': web['text'], 'quote': web['text']}
+        return plan(context, action='answer', response_kind='technical',
+                    response=web['text'] + ' [1]', technical_claims=[claim]), {'answer_sources': [web]}
+
+    monkeypatch.setattr(ai, 'generate_plan', provider)
+    with storage() as session:
+        item = conversation(session)
+        outcome = respond(session, 'Модель Veichi SD700', conversation=item, require_model=True)
+
+        assert outcome['engine'] == 'openai'
+        assert outcome['sources'] == [web]
+        assert session.get(ConversationState, item.id).state['source_refs'][0]['url'] == web['url']
+
+
 def test_unknown_parameter_changes_explanation_without_guess_or_first_visit(storage):
     seen = []
     def provider(context):
