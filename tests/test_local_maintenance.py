@@ -103,11 +103,37 @@ def test_dependency_free_update_guard_detects_a_real_listening_port():
     assert_server_stopped(port=port)
 
 
-def test_update_guard_does_not_treat_timeout_as_success(monkeypatch):
+def test_update_guard_checks_port_after_connection_timeout(monkeypatch):
     import socket
     from scripts.check_server_stopped import assert_server_stopped
     def unavailable(*args, **kwargs):
         raise TimeoutError('fixture timeout')
     monkeypatch.setattr(socket, 'create_connection', unavailable)
-    with pytest.raises(ValueError, match='Не удалось проверить'):
+    with socket.socket() as listener:
+        listener.bind(('127.0.0.1', 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        with pytest.raises(ValueError, match='Остановите POSTEKS'):
+            assert_server_stopped(port=port)
+    assert_server_stopped(port=port)
+
+
+def test_update_guard_uses_exclusive_windows_bind_and_reports_denial(monkeypatch):
+    import errno
+    import socket
+    import sys
+    from unittest.mock import MagicMock, Mock
+    from scripts.check_server_stopped import assert_server_stopped
+
+    probe = Mock()
+    manager = MagicMock()
+    manager.__enter__.return_value = probe
+    monkeypatch.setattr(sys, 'platform', 'win32')
+    monkeypatch.setattr(socket, 'SO_EXCLUSIVEADDRUSE', -5, raising=False)
+    monkeypatch.setattr(socket, 'create_connection', Mock(side_effect=TimeoutError))
+    monkeypatch.setattr(socket, 'socket', Mock(return_value=manager))
+    probe.bind.side_effect = OSError(errno.EACCES, 'fixture denial')
+    with pytest.raises(ValueError, match=f'код ОС: {errno.EACCES}'):
         assert_server_stopped()
+    probe.setsockopt.assert_called_once_with(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    probe.bind.assert_called_once_with(('127.0.0.1', 8080))
