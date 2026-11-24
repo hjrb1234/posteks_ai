@@ -1,0 +1,37 @@
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+storage/
+*.db
+*.db-*
+*.sqlite*
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.log
+*.pid
+artifacts/
+reports/
+backups/
+# Original private input retained locally; never include it in a public commit.
+docs/TECHNICAL_SPEC.md
+*.pdf
+*.xlsx
+*.xls
+*.docx
+*.doc
+*.zip
+!downloads/posteks_ai_windows.zip
+frontend/preview-dist/
+# Earlier local audit reports describe private input materials; retain locally only.
+docs/AUDIT.md
+docs/VALIDATION.md
+docs/CLOUD_ENVIRONMENT.md
+docs/validation/
+*.tsbuildinfo
